@@ -85,7 +85,7 @@ def _get_backward_seam(energy: np.ndarray) -> np.ndarray:
 
 
 def _get_backward_seams(gray: np.ndarray, num_seams: int,
-                        keep_mask: Optional[np.ndarray]) -> np.ndarray:
+                        keep_mask: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
     """Compute the minimum N vertical seams using backward energy"""
     h, w = gray.shape
     seams_mask = np.zeros((h, w), dtype=np.bool)
@@ -115,7 +115,7 @@ def _get_backward_seams(gray: np.ndarray, num_seams: int,
         mid_energy = _get_energy(mid_block)[:, pad_lo:mid_w - pad_hi]
         energy = np.hstack((energy[:, :lo], mid_energy, energy[:, hi + 1:]))
 
-    return seams_mask
+    return seams_mask, keep_mask
 
 
 def _get_forward_seam(gray: np.ndarray,
@@ -211,7 +211,7 @@ def _reduce_width(src: np.ndarray, delta_width: int, energy_mode: str,
 
 
 def _expand_width(src: np.ndarray, delta_width: int, energy_mode: str,
-                  keep_mask: Optional[np.ndarray]) -> np.ndarray:
+                  keep_mask: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
     """Expand the width of image by delta_width pixels"""
     assert src.ndim in (2, 3) and delta_width >= 0
     if src.ndim == 2:
@@ -223,7 +223,7 @@ def _expand_width(src: np.ndarray, delta_width: int, energy_mode: str,
         src_h, src_w, src_c = src.shape
         dst_shape = (src_h, src_w + delta_width, src_c)
 
-    seams_mask = _get_seams(gray, delta_width, energy_mode, keep_mask)
+    seams_mask, keep_mask = _get_seams(gray, delta_width, energy_mode, keep_mask)
     dst = np.empty(dst_shape, dtype=np.uint8)
 
     for row in range(src_h):
@@ -238,7 +238,7 @@ def _expand_width(src: np.ndarray, delta_width: int, energy_mode: str,
             dst_col += 1
         assert dst_col == src_w + delta_width
 
-    return dst
+    return dst, keep_mask
 
 
 def _resize_width(src: np.ndarray, width: int, energy_mode: str,
@@ -250,7 +250,7 @@ def _resize_width(src: np.ndarray, width: int, energy_mode: str,
 
     src_w = src.shape[1]
     if src_w < width:
-        dst = _expand_width(src, width - src_w, energy_mode, keep_mask)
+        dst, keep_mask = _expand_width(src, width - src_w, energy_mode, keep_mask)
     else:
         dst, keep_mask = _reduce_width(src, src_w - width, energy_mode, keep_mask)
     return dst, keep_mask
