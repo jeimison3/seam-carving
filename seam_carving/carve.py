@@ -1,5 +1,4 @@
 from typing import Tuple, Optional
-import time
 import numpy as np
 from scipy.ndimage import sobel
 
@@ -93,13 +92,13 @@ def _get_backward_seams(gray: np.ndarray, num_seams: int,
     rows = np.arange(0, h, dtype=np.int32)
     idx_map = np.tile(np.arange(0, w, dtype=np.int32), h).reshape((h, w))
     energy = _get_energy(gray)
-    # TODO: Check if this change it's right
-    if keep_mask is not None:
-            energy[keep_mask] += KEEP_MASK_ENERGY
+    
     for _ in range(num_seams):
-        # Iteration took 3s with mask, caused by lines below (compared to 0.04s usually)
-        # if keep_mask is not None: 
-        #     energy[keep_mask] += KEEP_MASK_ENERGY
+        # TODO: Try to optimize this.
+        # The operation took ~3s with mask, per iteraction.
+        # on the lines below (compared to 0.04s without them)
+        if keep_mask is not None: 
+            energy[keep_mask] += KEEP_MASK_ENERGY
         seam = _get_backward_seam(energy)
         seams_mask[rows, idx_map[rows, seam]] = True
 
@@ -144,7 +143,7 @@ def _get_forward_seam(gray: np.ndarray,
         curr_lshift = np.hstack((curr_row[1:], curr_row[-1]))
         curr_rshift = np.hstack((curr_row[0], curr_row[:-1]))
         cost_top = np.abs(curr_lshift - curr_rshift)
-        if not expanding and keep_mask is not None:
+        if keep_mask is not None:
             cost_top[keep_mask[r]] += KEEP_MASK_ENERGY
 
         prev_row = gray[r - 1]
