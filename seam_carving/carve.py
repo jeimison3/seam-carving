@@ -1,5 +1,5 @@
 from typing import Tuple, Optional
-
+import time
 import numpy as np
 from scipy.ndimage import sobel
 
@@ -85,16 +85,21 @@ def _get_backward_seam(energy: np.ndarray) -> np.ndarray:
 
 
 def _get_backward_seams(gray: np.ndarray, num_seams: int,
-                        keep_mask: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+                        keep_mask: Optional[np.ndarray],
+                        expanding: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     """Compute the minimum N vertical seams using backward energy"""
     h, w = gray.shape
     seams_mask = np.zeros((h, w), dtype=np.bool)
     rows = np.arange(0, h, dtype=np.int32)
     idx_map = np.tile(np.arange(0, w, dtype=np.int32), h).reshape((h, w))
     energy = _get_energy(gray)
-    for _ in range(num_seams):
-        if keep_mask is not None:
+    # TODO: Check if this change it's right
+    if keep_mask is not None:
             energy[keep_mask] += KEEP_MASK_ENERGY
+    for _ in range(num_seams):
+        # Iteration took 3s with mask, caused by lines below (compared to 0.04s usually)
+        # if keep_mask is not None: 
+        #     energy[keep_mask] += KEEP_MASK_ENERGY
         seam = _get_backward_seam(energy)
         seams_mask[rows, idx_map[rows, seam]] = True
 
@@ -119,7 +124,8 @@ def _get_backward_seams(gray: np.ndarray, num_seams: int,
 
 
 def _get_forward_seam(gray: np.ndarray,
-                      keep_mask: Optional[np.ndarray]) -> np.ndarray:
+                      keep_mask: Optional[np.ndarray],
+                      expanding: bool = False) -> np.ndarray:
     """Compute the minimum vertical seam using forward energy"""
     assert gray.size > 0 and gray.ndim == 2
     gray = gray.astype(np.float32)
@@ -138,7 +144,7 @@ def _get_forward_seam(gray: np.ndarray,
         curr_lshift = np.hstack((curr_row[1:], curr_row[-1]))
         curr_rshift = np.hstack((curr_row[0], curr_row[:-1]))
         cost_top = np.abs(curr_lshift - curr_rshift)
-        if keep_mask is not None:
+        if not expanding and keep_mask is not None:
             cost_top[keep_mask[r]] += KEEP_MASK_ENERGY
 
         prev_row = gray[r - 1]
@@ -183,19 +189,21 @@ def _get_forward_seams(gray: np.ndarray, num_seams: int,
 
 
 def _get_seams(gray: np.ndarray, num_seams: int, energy_mode: str,
-               keep_mask: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+               keep_mask: Optional[np.ndarray], expanding: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     """Get the minimum N seams from the grayscale image"""
     assert energy_mode in VALID_ENERGY_MODES
     if energy_mode == BACKWARD_ENERGY:
-        return _get_backward_seams(gray, num_seams, keep_mask)
+        s, km = _get_backward_seams(gray, num_seams, keep_mask, expanding)
     else:
-        return _get_forward_seams(gray, num_seams, keep_mask)
+        s, km = _get_forward_seams(gray, num_seams, keep_mask)
+    return s, km if not expanding else keep_mask
 
 
 def _reduce_width(src: np.ndarray, delta_width: int, energy_mode: str,
                   keep_mask: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
     """Reduce the width of image by delta_width pixels"""
     assert src.ndim in (2, 3) and delta_width >= 0
+    hasKeepMask = keep_mask is not None
     if src.ndim == 2:
         gray = src
         src_h, src_w = src.shape
@@ -204,8 +212,11 @@ def _reduce_width(src: np.ndarray, delta_width: int, energy_mode: str,
         gray = _rgb2gray(src)
         src_h, src_w, src_c = src.shape
         dst_shape = (src_h, src_w - delta_width, src_c)
-
+    if _LEVEL_DEBUG >= 1 and hasKeepMask:
+        print("KMask antes: ",keep_mask.shape)
     seams_mask, keep_mask = _get_seams(gray, delta_width, energy_mode, keep_mask)
+    if _LEVEL_DEBUG >= 1 and hasKeepMask:
+        print("KMask depois: ",keep_mask.shape)
     dst = src[~seams_mask].reshape(dst_shape)
     return dst, keep_mask
 
@@ -214,6 +225,8 @@ def _expand_width(src: np.ndarray, delta_width: int, energy_mode: str,
                   keep_mask: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
     """Expand the width of image by delta_width pixels"""
     assert src.ndim in (2, 3) and delta_width >= 0
+    hasKeepMask = keep_mask is not None
+    global _LEVEL_DEBUG
     if src.ndim == 2:
         gray = src
         src_h, src_w = src.shape
@@ -222,10 +235,11 @@ def _expand_width(src: np.ndarray, delta_width: int, energy_mode: str,
         gray = _rgb2gray(src)
         src_h, src_w, src_c = src.shape
         dst_shape = (src_h, src_w + delta_width, src_c)
-
-    seams_mask, keep_mask = _get_seams(gray, delta_width, energy_mode, keep_mask)
+    seams_mask, keep_mask = _get_seams(gray, delta_width, energy_mode, keep_mask, True)
     dst = np.empty(dst_shape, dtype=np.uint8)
-
+    kmask_shape = (src_h, src_w + delta_width)
+    if hasKeepMask:
+        keep_mask_incr = np.empty(kmask_shape, dtype=np.uint8)
     for row in range(src_h):
         dst_col = 0
         for src_col in range(src_w):
@@ -233,12 +247,15 @@ def _expand_width(src: np.ndarray, delta_width: int, energy_mode: str,
                 lo = max(0, src_col - 1)
                 hi = src_col + 1
                 dst[row, dst_col] = src[row, lo:hi].mean(axis=0)
+                if hasKeepMask:
+                    keep_mask_incr[row, dst_col] = keep_mask[row, lo:hi].mean(axis=0)
                 dst_col += 1
             dst[row, dst_col] = src[row, src_col]
+            if hasKeepMask:
+                keep_mask_incr[row, dst_col] = keep_mask[row, src_col]
             dst_col += 1
         assert dst_col == src_w + delta_width
-
-    return dst, keep_mask
+    return dst, keep_mask_incr if hasKeepMask else None
 
 
 def _resize_width(src: np.ndarray, width: int, energy_mode: str,
@@ -333,35 +350,24 @@ def resize(src: np.ndarray, size: Tuple[int, int],
         raise ValueError('Invalid energy mode {}: expected {}'.format(
             energy_mode, VALID_ENERGY_MODES))
 
-    if keep_mask is not None:
+    hasKeepMask = keep_mask is not None
+    if hasKeepMask:
         keep_mask = _check_mask(keep_mask, (src_h, src_w))
 
     global _LEVEL_DEBUG
     if order == WIDTH_FIRST:
-        if _LEVEL_DEBUG >= 2:
-            print("WIDTH")
-            print("K",keep_mask.shape)
-            print("SRC",src.shape)
         src, keep_mask = _resize_width(src, width, energy_mode, keep_mask)
-        keep_mask = keep_mask.T
-        if _LEVEL_DEBUG >= 2:
-            print("HEIGHT")
-            print("K",keep_mask.shape)
-            print("SRC",src.shape)
+        if hasKeepMask:
+            keep_mask = keep_mask.T
         src, keep_mask = _resize_height(src, height, energy_mode, keep_mask)
-        keep_mask = keep_mask.T
+        if hasKeepMask:
+            keep_mask = keep_mask.T
     else:
-        keep_mask = keep_mask.T
-        if _LEVEL_DEBUG >= 2:
-            print("HEIGHT")
-            print("K",keep_mask.shape)
-            print("SRC",src.shape)
+        if hasKeepMask:
+            keep_mask = keep_mask.T
         src, keep_mask = _resize_height(src, height, energy_mode, keep_mask)
-        keep_mask = keep_mask.T
-        if _LEVEL_DEBUG >= 2:
-            print("WIDTH")
-            print("K",keep_mask.shape)
-            print("SRC",src.shape)
+        if hasKeepMask:
+            keep_mask = keep_mask.T
         src, keep_mask = _resize_width(src, width, energy_mode, keep_mask)
 
     return src
